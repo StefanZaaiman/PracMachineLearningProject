@@ -1,0 +1,179 @@
+---
+title: "Course Project - Practical Machine Learning"
+author: "Stefan Zaaiman"
+date: "21 November 2015"
+output: html_document
+---
+
+# Barbell lifting form analysis
+
+### 1. Introduction and overview
+
+This project is the Practical Machine Learning course project from the Johns Hopkins Bloomberg School of Public Health's data science series.The dataset used for this project is called the Weight Lifting Exercise Dataset (more information is available [here](http://groupware.les.inf.puc-rio.br/har) - about halfway down the page under the heading "Weight Lifting Exercises Dataset").
+
+The abovementioned website has the following description of the dataset: six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. The data is generated from accelerometers that was fitted on the belt, forearm, arm, and dumbell for each participant. The original research paper that analysed this dataset can be found [here](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201).
+
+The goal of this project is to build a machine learning model on this dataset in order to predict the manner in which 20 new test cases did the exercise (A-E).
+
+### 2. Exploratory analysis
+
+A training and testing dataset were provided. An analysis was done on the training set in order to identify the overall structure of the data. Quite a few columns had more than 95% empty or NA values. These columns were removed from the dataset using the following code:
+
+
+```{r, echo=TRUE, cache=TRUE}
+# Reading in the datasets
+setwd("C:/Users/Stefan/Desktop/Course Project PracMacLearn")
+training = read.csv("pml-training.csv")
+testing = read.csv("pml-testing.csv")
+
+# Removing empty and NA columns from the dataset
+training=training[ ,colSums(is.na(training))/nrow(training)<0.95]
+training=training[ ,colSums(training == "")/nrow(training)<0.95]
+testing=testing[ ,colSums(is.na(testing))/nrow(testing)<0.95]
+testing=testing[ ,colSums(testing == "")/nrow(testing)<0.95]
+```
+
+
+This reduced the dataset from an original set of 160 variables down to a set of 60 variables. The next check was to find highly correlated variables using the "findCorrelarion" function from the caret package. A correlation of more than 80% was assumed to be high and the identified columns with high pairwise correlations were removed. The following code did this check and removal:
+
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+# Load the caret package
+library(caret)
+
+# Calculate the correlation matrix
+corMatrix = cor(training[,7:59])
+
+# Find highly correlated variables
+highCor = findCorrelation(corMatrix, cutoff = 0.80)
+
+# Remove these columns with high pairwise correlation
+training=training[,-highCor]
+testing=testing[,-highCor]
+```
+
+
+This reduced the dataset further down to 47 variables. The next check was to look for variables that have near zero variance (i.e. if the variable has the same value acorss all observations it will have a zero variance and also zero predictive power). This check showed that the "new_window" variable had near zero variance and it was therefore removed. Further analysis on the dataset showed that the "X" variable was also just an identification variables and it was therefore also removed. The two timestamp variables and window number was also removed, as any addition they provide to predictive value would be spurious.
+
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+
+# Calculate the near zero variance
+nzv=nearZeroVar(training,saveMetrics = TRUE)
+
+# Remove variables
+training=subset(training, select=-c(new_window, X, raw_timestamp_part_2, cvtd_timestamp, num_window))
+testing=subset(testing, select=-c(new_window, X, raw_timestamp_part_2, cvtd_timestamp, num_window))
+```
+
+
+This further reduced the dataset to 42 variables. The last change that was done was to center and scale all the numeric data using the caret "preProcess" function:
+
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+
+# Calculate preprocess function
+preProcValues = preProcess(training, method = c("center", "scale"))
+
+# Apply to training and testing datasets
+trainTransformed = predict(preProcValues, training)
+testTransformed = predict(preProcValues, testing)
+```
+
+
+In order to calculate a proper out of sample error rate (even though the error rate on the training dataset when using cross validation is technically out of sample), the training dataset will be further split into a training (75%) and training validation (25%) dataset. The training validation dataset will be used to calculate the out of sample error.
+
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+
+# Split training dataset into a training and training validation dataset
+set.seed(300)
+inTrain = createDataPartition(y = trainTransformed$classe, p = 0.75, list=FALSE)
+
+trainTransformedModel = trainTransformed[inTrain,]
+trainTransformedValidation = trainTransformed[-inTrain,]
+```
+
+
+### 3. Model training
+
+Now that the training dataset has been cleaned and set up, we are going to use a random forest model on the training dataset. Random forests are a very popular supervised learning modelling methodology, and it bootstraps samples and variables to build multiple trees and then provides a prediction according to individual tree "votes" across the forest. It can produce highly accurate models, but can take a long time to build. They are also not very easy to interpret.
+
+The following code activates parallel processing on multi core machines, sets the trainControl parameter to do 10-fold cross validation (build the model on 9/10ths of the dataset and test for accuracy on the other 1/10th and repeat this 10 times), set the random seed for reproducability, and then use the caret "train" function to build the random forest.
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE, results = "hide", warning=FALSE, message=FALSE}
+# Initialise parallel computing power
+library(doParallel)
+cl = makeCluster(detectCores()) 
+registerDoParallel(cl)
+
+# Set fircontrol for crossvalidation and set random seed
+fitControl = trainControl(method = "cv", number = 10)
+set.seed(300)
+
+# Use caret to train model
+rfModel = train(classe ~ .,
+		    data = trainTransformedModel,  
+	           method = "rf", 
+		    trControl = fitControl, 
+		    verbose = FALSE, 
+		    allowParallel=TRUE,
+		    tuneLength = 10)
+```
+
+
+It should be noted that the train function of caret tries to optimise the "mtry" variable of the randomForest package ("mtry" is the number of variables that will be randomly sampled as candidates at each split of a tree). The following code shows the final selected "mtry" (which turned out to be mtry = 6), the model accuracy of the final chosen model (which was an out of bag estimated error rate of 0.74%), as well as the relative variable importance (which showed that "roll_belt" turned out to be the most important variable).
+
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+# Print the final selected value of mtry
+print(rfModel)
+
+# Print the final model accuracy
+print(rfModel$finalModel)
+
+# Print the final variable importance
+varImp(rfModel, scale=FALSE)
+```
+
+
+### 4. Out of sample error rate
+
+Calculating the out of sample error directly from the confusion matrix above yields 1-(4181+2826+2534+2372+2696)/14718 = 0.74% which is extremely low. This is however only the out of sample error on the training dataset using 10-fold cross validation and it might still include some overfitting. In order to get a true out of sample error rate, the model was applied to the 25% training validation sample (up to this stage the 25% validation part of the training data was never exposed to the machine learning algorithm therefore the error estimated from this dataset will be a true out of sample error rate):
+
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+# Predict the test cases
+predValidation = predict(rfModel, newdata = trainTransformedValidation)
+confusionMatrix(predValidation, trainTransformedValidation$classe)
+outOfSampleError = 1 - sum(diag(table(predValidation, trainTransformedValidation$classe)))/nrow(trainTransformedValidation)
+```
+
+
+The true out of sample error rate of the fitted model on the 25% hold-out validation sample was `r round(outOfSampleError*100,2)`%, which is very similar than the above out of sample error that was calculated on the 75% training dataset used to build the model. Comfort can therefore be taken that the model is not overfitted even though it is exceptionally accurate.
+
+
+### 5. Model prediction
+
+The following code predicts the supplied 20 test cases, and writes out the required text files for submission to the second part of the project.
+
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+# Predict the test cases
+predTest = predict(rfModel, newdata = testTransformed)
+
+# Create prediction submission files
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+pml_write_files(predTest)
+```
+
+This submission of the model scored 20/20 on the second part of the project. I hope you are impressed. I was surprised!
+
+Have a great December!
+
+### The end
